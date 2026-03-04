@@ -92,12 +92,25 @@ module SevillaStats
     end
 
     # -------------------------------------------------------------------------
-    # Fetch the emblem URL for a competition, returns nil if unavailable/404
-    # Results are cached in-memory for the lifetime of the client instance
+    # Fetch the emblem URL for a competition, returns nil if unavailable/404.
+    # Competitions in OVERRIDDEN_EMBLEMS skip the API entirely and always use
+    # the specified URL (e.g. Copa del Rey which 404s on football-data.org).
+    # Results are cached in-memory for the lifetime of the client instance.
     # -------------------------------------------------------------------------
+    OVERRIDDEN_EMBLEMS = {
+      "2079" => "https://upload.wikimedia.org/wikipedia/commons/e/eb/RFEF_-_Copa_del_Rey.svg"
+    }.freeze
+
     def competition_emblem(competition_id)
       @emblem_cache ||= {}
-      return @emblem_cache[competition_id.to_s] if @emblem_cache.key?(competition_id.to_s)
+      comp_id_s = competition_id.to_s
+      return @emblem_cache[comp_id_s] if @emblem_cache.key?(comp_id_s)
+
+      # Use override URL directly — skip API and HEAD check entirely
+      if OVERRIDDEN_EMBLEMS.key?(comp_id_s)
+        @emblem_cache[comp_id_s] = OVERRIDDEN_EMBLEMS[comp_id_s]
+        return @emblem_cache[comp_id_s]
+      end
 
       response = get("/competitions/#{competition_id}")
       emblem_url = response&.dig("emblem")
@@ -105,7 +118,7 @@ module SevillaStats
       # Verify the emblem URL actually resolves (guard against 404s)
       verified_url = emblem_url && emblem_reachable?(emblem_url) ? emblem_url : nil
 
-      @emblem_cache[competition_id.to_s] = verified_url
+      @emblem_cache[comp_id_s] = verified_url
       verified_url
     end
 
