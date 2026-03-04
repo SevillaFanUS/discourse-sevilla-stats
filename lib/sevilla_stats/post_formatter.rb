@@ -2,31 +2,33 @@
 
 module SevillaStats
   class PostFormatter
-    SEVILLA_CREST   = "https://crests.football-data.org/559.png"
-    COMPETITION_EMBLEMS = {
-      "2014" => "https://crests.football-data.org/PD.png",
-      "2015" => "https://crests.football-data.org/CDR.png",
-      "2018" => "https://crests.football-data.org/UEL.png",
-      "2001" => "https://crests.football-data.org/UCL.png"
-    }.freeze
+    SEVILLA_CREST = "https://crests.football-data.org/559.png"
 
     COMPETITION_LABELS = {
       "2014" => "La Liga",
-      "2015" => "Copa del Rey",
-      "2018" => "UEFA Europa League",
-      "2001" => "UEFA Champions League"
+      "2079" => "Copa del Rey",
+      "2146" => "UEFA Europa League",
+      "2001" => "UEFA Champions League",
+      "2154" => "UEFA Conference League"
     }.freeze
 
     POSITION_ORDER = %w[Goalkeeper Defender Midfielder Forward Attacker].freeze
 
     # -------------------------------------------------------------------------
     # Build the initial pinned topic body (created on first run)
+    # emblems: hash of { competition_id => url_or_nil } from ApiClient#competition_emblems
     # -------------------------------------------------------------------------
-    def self.initial_topic_body(season)
+    def self.initial_topic_body(season, emblems = {})
       year_start = season.to_i
       year_end   = year_start + 1
 
-      <<~MD
+      comp_rows = emblems.map do |comp_id, emblem_url|
+        label       = COMPETITION_LABELS[comp_id.to_s] || "Competition #{comp_id}"
+        emblem_cell = emblem_url ? "![#{label}](#{emblem_url})" : "—"
+        "| #{label} | #{emblem_cell} |"
+      end.join("\n")
+
+      body = <<~MD
         # :bar_chart: Sevilla FC — #{year_start}/#{year_end} Season Statistics
 
         ![Sevilla FC](#{SEVILLA_CREST})
@@ -50,9 +52,7 @@ module SevillaStats
 
         | Competition | Emblem |
         |-------------|--------|
-        | La Liga | ![La Liga](#{COMPETITION_EMBLEMS["2014"]}) |
-        | Copa del Rey | ![Copa del Rey](#{COMPETITION_EMBLEMS["2015"]}) |
-        | UEFA Europa League | ![UEL](#{COMPETITION_EMBLEMS["2018"]}) |
+        COMP_ROWS_PLACEHOLDER
 
         ---
 
@@ -60,24 +60,26 @@ module SevillaStats
 
         *Last generated: #{Time.now.strftime("%d %B %Y")}*
       MD
+
+      body.sub("COMP_ROWS_PLACEHOLDER", comp_rows)
     end
 
     # -------------------------------------------------------------------------
     # Build a matchday update reply post
     # match_info: hash with match details
-    # new_stats:  array of SevillaPlayerStat records (current season totals)
-    # standings:  array of standing rows (optional)
+    # season:     string e.g. "2025"
+    # standings:  array of standing rows (optional, for La Liga)
+    # emblems:    hash of { competition_id => url_or_nil } from ApiClient#competition_emblems
     # -------------------------------------------------------------------------
-    def self.matchday_update(match_info:, season:, standings: [])
+    def self.matchday_update(match_info:, season:, standings: [], emblems: {})
       competition_id   = match_info[:competition_id].to_s
       competition_name = COMPETITION_LABELS[competition_id] || match_info[:competition_name]
-      comp_emblem      = COMPETITION_EMBLEMS[competition_id]
+      comp_emblem      = emblems[competition_id]
       matchday_label   = match_info[:matchday] ? "Matchday #{match_info[:matchday]}" : "Match"
 
       year_start = season.to_i
       year_end   = year_start + 1
 
-      # Determine result text
       home = match_info[:home_team]
       away = match_info[:away_team]
       hs   = match_info[:home_score]
@@ -88,7 +90,7 @@ module SevillaStats
       lines << "---"
       lines << ""
 
-      # Header
+      # Only render emblem image if URL was verified (not nil)
       if comp_emblem
         lines << "## #{result_emoji} #{matchday_label} Update | ![#{competition_name}](#{comp_emblem}) #{competition_name}"
       else
@@ -99,37 +101,34 @@ module SevillaStats
       lines << "> **#{home} #{hs}–#{as_} #{away}** | #{match_info[:match_date]&.strftime("%d %B %Y")}"
       lines << ""
 
-      # Season totals header
       lines << "### :bar_chart: Season Totals — #{year_start}/#{year_end} (All Competitions)"
       lines << ""
 
-      # Goals & Assists table
       lines << build_goals_assists_table(season)
       lines << ""
 
-      # Appearances & Minutes table
       lines << build_appearances_table(season)
       lines << ""
 
-      # Discipline table
       lines << build_discipline_table(season)
       lines << ""
 
-      # Per-competition breakdown
       lines << "### :clipboard: By Competition"
       lines << ""
 
       competition_ids_with_data(season).each do |comp_id|
-        comp_label   = COMPETITION_LABELS[comp_id] || comp_id
-        comp_emblem2 = COMPETITION_EMBLEMS[comp_id]
-        header = comp_emblem2 ? "#### ![#{comp_label}](#{comp_emblem2}) #{comp_label}" : "#### #{comp_label}"
+        comp_label      = COMPETITION_LABELS[comp_id] || comp_id
+        comp_emblem_url = emblems[comp_id]
+
+        # Only render emblem image if URL was verified (not nil)
+        header = comp_emblem_url ? "#### ![#{comp_label}](#{comp_emblem_url}) #{comp_label}" : "#### #{comp_label}"
         lines << header
         lines << ""
         lines << build_competition_table(season, comp_id)
         lines << ""
       end
 
-      # League table (if La Liga data available)
+      # League standings (only appended when the triggering match was La Liga)
       if competition_id == "2014" && standings.any?
         lines << "### :trophy: La Liga Standings (Top 10)"
         lines << ""
@@ -148,7 +147,7 @@ module SevillaStats
     # =========================================================================
 
     def self.sevilla_result_emoji(home_team, away_team, home_score, away_score)
-      sevilla_home = home_team.to_s.downcase.include?("sevilla")
+      sevilla_home  = home_team.to_s.downcase.include?("sevilla")
       sevilla_score = sevilla_home ? home_score.to_i : away_score.to_i
       opp_score     = sevilla_home ? away_score.to_i : home_score.to_i
 
@@ -252,11 +251,11 @@ module SevillaStats
       lines << "|----:|-----|--:|--:|--:|--:|---:|---:|---:|----:|"
 
       standings.first(10).each do |row|
-        team_name = row.dig("team", "name") || "Unknown"
-        bold_open  = team_name.downcase.include?("sevilla") ? "**" : ""
-        bold_close = team_name.downcase.include?("sevilla") ? "**" : ""
+        team_name  = row.dig("team", "name") || "Unknown"
+        is_sevilla = team_name.downcase.include?("sevilla")
+        b          = is_sevilla ? "**" : ""
 
-        lines << "| #{bold_open}#{row["position"]}#{bold_close} | #{bold_open}#{team_name}#{bold_close} | #{row["playedGames"]} | #{row["won"]} | #{row["draw"]} | #{row["lost"]} | #{row["goalsFor"]} | #{row["goalsAgainst"]} | #{row["goalDifference"]} | #{bold_open}#{row["points"]}#{bold_close} |"
+        lines << "| #{b}#{row["position"]}#{b} | #{b}#{team_name}#{b} | #{row["playedGames"]} | #{row["won"]} | #{row["draw"]} | #{row["lost"]} | #{row["goalsFor"]} | #{row["goalsAgainst"]} | #{row["goalDifference"]} | #{b}#{row["points"]}#{b} |"
       end
 
       lines.join("\n")
