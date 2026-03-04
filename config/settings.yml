@@ -1,0 +1,53 @@
+plugins:
+  sevilla_stats_enabled:
+    default: true
+    type: bool
+    client: false
+
+  sevilla_stats_api_key:
+    default: ""
+    type: string
+    secret: true
+    client: false
+
+  sevilla_stats_season:
+    default: "2025"
+    type: string
+    client: false
+
+  # Sevilla FC team ID on football-data.org
+  sevilla_stats_team_id:
+    default: 559
+    type: integer
+    client: false
+
+  # Competition IDs (comma-separated)
+  # 2014 = La Liga, 2015 = Copa del Rey, 2018 = UEFA Europa League, 2001 = Champions League
+  sevilla_stats_competition_ids:
+    default: "2014,2015,2018"
+    type: string
+    client: false
+
+  # Discourse category ID where the season stats topic will live
+  sevilla_stats_category_id:
+    default: 1
+    type: integer
+    client: false
+
+  # Stored topic ID once created (auto-populated on first run)
+  sevilla_stats_topic_id:
+    default: 0
+    type: integer
+    client: false
+
+  # Tag to apply to the season stats topic
+  sevilla_stats_topic_tag:
+    default: "season-stats"
+    type: string
+    client: false
+
+  # How often to check for new match results (in minutes)
+  sevilla_stats_check_interval:
+    default: 180
+    type: integer
+    client: false
