@@ -24,7 +24,7 @@ plugins:
   # Competition IDs (comma-separated)
   # 2014 = La Liga, 2015 = Copa del Rey, 2018 = UEFA Europa League, 2001 = Champions League
   sevilla_stats_competition_ids:
-    default: "2014,2015,2018"
+    default: "2014,2079,2146,2001,2154"
     type: string
     client: false
 
