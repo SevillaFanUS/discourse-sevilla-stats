@@ -15,8 +15,12 @@ module Jobs
       api_client = SevillaStats::ApiClient.new(SiteSetting.sevilla_stats_api_key)
       aggregator = SevillaStats::StatsAggregator.new(api_client, season)
 
+      # Fetch and verify emblem URLs once per job run (results are cached on api_client)
+      emblems = api_client.competition_emblems
+      Rails.logger.info("[SevillaStats] Resolved emblems: #{emblems.map { |k, v| "#{k}=#{v || 'nil'}" }.join(", ")}")
+
       # Step 1: Ensure the season stats topic exists
-      topic = ensure_season_stats_topic!(season)
+      topic = ensure_season_stats_topic!(season, emblems)
       return unless topic
 
       # Step 2: Refresh all stats and find new unprocessed matches
@@ -31,7 +35,7 @@ module Jobs
 
       # Step 3: For each new match, enrich stats from lineup data, then post update
       new_matches.each do |match|
-        process_match!(match, aggregator, topic, season, api_client)
+        process_match!(match, aggregator, topic, season, api_client, emblems)
       end
     rescue => e
       Rails.logger.error("[SevillaStats] Job failed: #{e.message}\n#{e.backtrace.first(5).join("\n")}")
@@ -42,25 +46,23 @@ module Jobs
     # -------------------------------------------------------------------------
     # Ensure the season stats topic exists; create it on first run if missing
     # -------------------------------------------------------------------------
-    def ensure_season_stats_topic!(season)
+    def ensure_season_stats_topic!(season, emblems = {})
       stored_topic_id = SiteSetting.sevilla_stats_topic_id.to_i
 
-      # Check if a valid topic ID is stored and the topic still exists
       if stored_topic_id > 0
         topic = Topic.find_by(id: stored_topic_id)
         return topic if topic && !topic.trashed?
         Rails.logger.warn("[SevillaStats] Stored topic ID #{stored_topic_id} not found — recreating")
       end
 
-      # Create the topic on first run
       Rails.logger.info("[SevillaStats] Creating Season Stats topic for season #{season}")
-      create_season_stats_topic!(season)
+      create_season_stats_topic!(season, emblems)
     rescue => e
       Rails.logger.error("[SevillaStats] Failed to ensure season stats topic: #{e.message}")
       nil
     end
 
-    def create_season_stats_topic!(season)
+    def create_season_stats_topic!(season, emblems = {})
       year_start  = season.to_i
       year_end    = year_start + 1
       category_id = SiteSetting.sevilla_stats_category_id
@@ -71,7 +73,6 @@ module Jobs
         return nil
       end
 
-      # Use the system user (or first admin) as post author
       post_author = User.find_by(id: -1) || User.admins.first
       unless post_author
         Rails.logger.error("[SevillaStats] No suitable author user found")
@@ -79,7 +80,7 @@ module Jobs
       end
 
       title = "Sevilla FC #{year_start}/#{year_end} Season Stats"
-      body  = SevillaStats::PostFormatter.initial_topic_body(season)
+      body  = SevillaStats::PostFormatter.initial_topic_body(season, emblems)
 
       post_creator = PostCreator.new(
         post_author,
@@ -120,7 +121,7 @@ module Jobs
     # -------------------------------------------------------------------------
     # Process a single finished match: enrich stats, then post reply
     # -------------------------------------------------------------------------
-    def process_match!(match, aggregator, topic, season, api_client)
+    def process_match!(match, aggregator, topic, season, api_client, emblems = {})
       match_id       = match["id"]
       competition_id = match.dig("competition", "id").to_s
       competition_name = match.dig("competition", "name")
@@ -157,7 +158,8 @@ module Jobs
       post_body = SevillaStats::PostFormatter.matchday_update(
         match_info: match_info,
         season:     season,
-        standings:  standings
+        standings:  standings,
+        emblems:    emblems
       )
 
       # Post the reply
