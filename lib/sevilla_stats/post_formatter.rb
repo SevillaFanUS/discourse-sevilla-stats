@@ -21,10 +21,12 @@ module SevillaStats
     def self.initial_topic_body(season, emblems = {})
       year_start = season.to_i
       year_end   = year_start + 1
+      year_short = "#{(year_start % 100).to_s.rjust(2, "0")}/#{(year_end % 100).to_s.rjust(2, "0")}"
 
       comp_rows = emblems.map do |comp_id, emblem_url|
         label       = COMPETITION_LABELS[comp_id.to_s] || "Competition #{comp_id}"
-        emblem_cell = emblem_url ? "![#{label}](#{emblem_url})" : "—"
+        # Only render image if URL verified; shrink to max 60px height
+        emblem_cell = emblem_url ? "<img src=\"#{emblem_url}\" height=\"60\" alt=\"#{label}\">" : "—"
         "| #{label} | #{emblem_cell} |"
       end.join("\n")
 
@@ -43,12 +45,12 @@ module SevillaStats
         ## :clipboard: How to Read This Thread
 
         - **This post** is the index — scroll down for individual matchday updates
-        - Stats cover **La Liga**, **Copa del Rey**, and **European competition**
+        - Stats cover all competitions Sevilla are active in this season
         - Player stats are aggregated across all competitions in the summary
 
         ---
 
-        ## :trophy: Competitions This Season
+        ## :trophy: Competitions This Season — #{year_short}
 
         | Competition | Emblem |
         |-------------|--------|
@@ -90,9 +92,9 @@ module SevillaStats
       lines << "---"
       lines << ""
 
-      # Only render emblem image if URL was verified (not nil)
+      # Header — emblem rendered at 60px height if verified, plain text otherwise
       if comp_emblem
-        lines << "## #{result_emoji} #{matchday_label} Update | ![#{competition_name}](#{comp_emblem}) #{competition_name}"
+        lines << "## #{result_emoji} #{matchday_label} Update | <img src=\"#{comp_emblem}\" height=\"60\" alt=\"#{competition_name}\"> #{competition_name}"
       else
         lines << "## #{result_emoji} #{matchday_label} Update | #{competition_name}"
       end
@@ -120,17 +122,23 @@ module SevillaStats
         comp_label      = COMPETITION_LABELS[comp_id] || comp_id
         comp_emblem_url = emblems[comp_id]
 
-        # Only render emblem image if URL was verified (not nil)
-        header = comp_emblem_url ? "#### ![#{comp_label}](#{comp_emblem_url}) #{comp_label}" : "#### #{comp_label}"
+        # Only render emblem image if URL was verified (not nil), at 60px height
+        header = if comp_emblem_url
+          "#### <img src=\"#{comp_emblem_url}\" height=\"60\" alt=\"#{comp_label}\"> #{comp_label}"
+        else
+          "#### #{comp_label}"
+        end
         lines << header
         lines << ""
         lines << build_competition_table(season, comp_id)
         lines << ""
       end
 
-      # League standings (only appended when the triggering match was La Liga)
+      # La Liga standings — always current table (API limitation noted inline)
       if competition_id == "2014" && standings.any?
-        lines << "### :trophy: La Liga Standings (Top 10)"
+        lines << "### :trophy: La Liga Standings (Current Table)"
+        lines << ""
+        lines << "_Note: The API only provides the current live standings, not the table as it was on this matchday._"
         lines << ""
         lines << build_standings_table(standings)
         lines << ""
@@ -161,12 +169,12 @@ module SevillaStats
     end
 
     def self.build_goals_assists_table(season)
+      # All players — including those with zero goals/assists
       rows = SevillaPlayerStat
                .season_totals(season)
-               .having("SUM(goals) > 0 OR SUM(assists) > 0")
-               .limit(15)
+               .reorder(Arel.sql("SUM(goals) DESC, SUM(assists) DESC, SUM(appearances) DESC"))
 
-      return "_No goal/assist data yet._" if rows.empty?
+      return "_No player data yet._" if rows.empty?
 
       lines = []
       lines << "**:goal_net: Goals & Assists**"
@@ -175,18 +183,19 @@ module SevillaStats
       lines << "|---|--------|----------|------:|--------:|--------:|"
 
       rows.each_with_index do |r, i|
-        lines << "| #{i + 1} | #{r.player_name} | #{r.position || "—"} | **#{r.total_goals}** | #{r.total_assists} | #{r.total_appearances} |"
+        goals_str = r.total_goals > 0 ? "**#{r.total_goals}**" : r.total_goals.to_s
+        lines << "| #{i + 1} | #{r.player_name} | #{r.position || "—"} | #{goals_str} | #{r.total_assists} | #{r.total_appearances} |"
       end
 
       lines.join("\n")
     end
 
     def self.build_appearances_table(season)
+      # All players with at least one appearance — no limit
       rows = SevillaPlayerStat
                .season_totals(season)
                .having("SUM(appearances) > 0")
                .reorder(Arel.sql("SUM(appearances) DESC, SUM(minutes_played) DESC"))
-               .limit(20)
 
       return "_No appearances data yet._" if rows.empty?
 
@@ -225,12 +234,12 @@ module SevillaStats
     end
 
     def self.build_competition_table(season, competition_id)
+      # All players with any activity in this competition — no limit
       rows = SevillaPlayerStat
                .for_season(season)
                .for_competition(competition_id)
-               .where("goals > 0 OR assists > 0 OR appearances > 0")
+               .where("appearances > 0")
                .order(goals: :desc, assists: :desc, appearances: :desc)
-               .limit(15)
 
       return "_No data for this competition yet._" if rows.empty?
 
