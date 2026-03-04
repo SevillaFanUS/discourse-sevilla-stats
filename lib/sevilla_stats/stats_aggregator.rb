@@ -11,7 +11,14 @@ module SevillaStats
 
     # -------------------------------------------------------------------------
     # Main entry point — fetches all stats and upserts DB records.
-    # Returns a hash of newly finished matches that haven't been processed yet.
+    # Returns an array of newly finished matches that haven't been processed yet.
+    #
+    # Strategy:
+    #   1. For each finished match, enrich all players from the lineup (minutes,
+    #      cards, appearances). This is the source of truth for who played.
+    #   2. After lineup enrichment, overlay goals/assists from the scorers
+    #      endpoint — but only update existing records, never create new ones
+    #      from scorers alone (they only cover players who scored).
     # -------------------------------------------------------------------------
     def refresh_all_stats!
       new_matches = []
@@ -19,11 +26,19 @@ module SevillaStats
       client.competition_ids.each do |comp_id|
         Rails.logger.info("[SevillaStats] Processing competition #{comp_id}")
 
-        # Fetch & persist player stats for this competition
-        fetch_and_store_scorers!(comp_id)
+        # Step 1: Find all finished Sevilla matches for this competition
+        all_finished = finished_matches_for_competition(comp_id)
 
-        # Find unprocessed finished matches in this competition
-        unprocessed = unprocessed_matches_for_competition(comp_id)
+        # Step 2: Enrich ALL finished matches from lineups (idempotent via job log check)
+        all_finished.each do |match|
+          enrich_from_match!(match["id"], comp_id) unless SevillaStatsJobLog.already_processed?(match["id"])
+        end
+
+        # Step 3: Overlay goals/assists from scorers endpoint onto existing records
+        overlay_goals_and_assists!(comp_id)
+
+        # Step 4: Collect unprocessed matches to trigger post creation
+        unprocessed = all_finished.reject { |m| SevillaStatsJobLog.already_processed?(m["id"]) }
         new_matches.concat(unprocessed)
       end
 
@@ -31,42 +46,8 @@ module SevillaStats
     end
 
     # -------------------------------------------------------------------------
-    # Fetch scorer/assist data from API and upsert into DB
-    # -------------------------------------------------------------------------
-    def fetch_and_store_scorers!(competition_id)
-      scorers = client.top_scorers(competition_id, season)
-      comp_name = client.competition_name(competition_id)
-
-      scorers.each do |scorer|
-        player = scorer["player"]
-        next unless player && player["id"]
-
-        SevillaPlayerStat.upsert_from_api!(
-          player_id:        player["id"],
-          player_name:      player["name"],
-          position:         player["position"],
-          nationality:      player["nationality"],
-          season:           season,
-          competition_id:   competition_id,
-          competition_name: comp_name,
-          appearances:      scorer["playedMatches"].to_i,
-          minutes_played:   0,   # scorers endpoint doesn't return minutes; enriched separately
-          goals:            scorer["goals"].to_i,
-          assists:          scorer["assists"].to_i,
-          yellow_cards:     0,   # enriched from match details
-          red_cards:        0,
-          last_updated:     Time.now
-        )
-      end
-
-      Rails.logger.info("[SevillaStats] Stored #{scorers.size} scorer records for comp #{competition_id}")
-    rescue => e
-      Rails.logger.error("[SevillaStats] Error storing scorers for comp #{competition_id}: #{e.message}")
-    end
-
-    # -------------------------------------------------------------------------
-    # Enrich player stats with minutes + cards from match lineups
-    # Called for each new match detected
+    # Enrich player stats with appearances, minutes + cards from match lineups.
+    # This is the primary source of player records — everyone who played.
     # -------------------------------------------------------------------------
     def enrich_from_match!(match_id, competition_id)
       detail = client.match_detail(match_id)
@@ -76,42 +57,38 @@ module SevillaStats
       team_id   = SiteSetting.sevilla_stats_team_id
 
       # Determine which side Sevilla is on
-      home_id = detail.dig("homeTeam", "id")
-      away_id = detail.dig("awayTeam", "id")
-      sevilla_key = home_id == team_id ? "homeTeam" : (away_id == team_id ? "awayTeam" : nil)
+      home_id     = detail.dig("homeTeam", "id")
+      away_id     = detail.dig("awayTeam", "id")
+      sevilla_key = if home_id == team_id
+                      "homeTeam"
+                    elsif away_id == team_id
+                      "awayTeam"
+                    end
       return unless sevilla_key
 
-      lineup   = detail.dig(sevilla_key, "lineup") || []
-      bench    = detail.dig(sevilla_key, "bench") || []
+      lineup      = detail.dig(sevilla_key, "lineup") || []
+      bench       = detail.dig(sevilla_key, "bench")  || []
       all_players = lineup + bench
 
-      bookings = (detail["bookings"] || []).select do |b|
-        b.dig("team", "id") == team_id
+      if all_players.empty?
+        Rails.logger.warn("[SevillaStats] Match #{match_id} has no lineup data yet — skipping enrichment")
+        return
       end
 
-      substitutions = (detail["substitutions"] || []).select do |s|
-        s.dig("team", "id") == team_id
-      end
-
+      bookings = (detail["bookings"] || []).select { |b| b.dig("team", "id") == team_id }
+      substitutions = (detail["substitutions"] || []).select { |s| s.dig("team", "id") == team_id }
       match_duration = detail.dig("score", "duration") == "EXTRA_TIME" ? 120 : 90
 
       all_players.each do |player|
         next unless player["id"]
 
-        # Calculate minutes played
-        minutes = calculate_minutes(
-          player:        player,
-          lineup:        lineup,
-          substitutions: substitutions,
-          match_duration: match_duration
-        )
+        minutes      = calculate_minutes(player: player, lineup: lineup,
+                                         substitutions: substitutions,
+                                         match_duration: match_duration)
+        player_cards = bookings.select { |b| b.dig("player", "id") == player["id"] }
+        yellow_cards = player_cards.count { |b| b["card"] == "YELLOW" }
+        red_cards    = player_cards.count { |b| %w[RED YELLOW_RED].include?(b["card"]) }
 
-        # Count cards
-        player_bookings = bookings.select { |b| b.dig("player", "id") == player["id"] }
-        yellow_cards = player_bookings.count { |b| b["card"] == "YELLOW" }
-        red_cards    = player_bookings.count { |b| %w[RED YELLOW_RED].include?(b["card"]) }
-
-        # Find or create stat record and add incremental values
         stat = SevillaPlayerStat.find_or_initialize_by(
           player_id:      player["id"],
           season:         season,
@@ -143,6 +120,8 @@ module SevillaStats
 
         stat.save!
       end
+
+      Rails.logger.info("[SevillaStats] Enriched #{all_players.size} players from match #{match_id}")
     rescue => e
       Rails.logger.error("[SevillaStats] Error enriching match #{match_id}: #{e.message}")
     end
@@ -156,28 +135,58 @@ module SevillaStats
 
     private
 
-    # Find finished Sevilla matches for a competition that haven't been posted yet
-    def unprocessed_matches_for_competition(competition_id)
+    # -------------------------------------------------------------------------
+    # Overlay goals and assists from the scorers endpoint onto existing records.
+    # Never creates new records — only updates players already in the DB from
+    # lineup enrichment. This avoids the scorers endpoint's bias toward players
+    # who scored (which would exclude defenders, keepers, etc.).
+    # -------------------------------------------------------------------------
+    def overlay_goals_and_assists!(competition_id)
+      scorers = client.top_scorers(competition_id, season)
+      return if scorers.empty?
+
+      updated = 0
+      scorers.each do |scorer|
+        player = scorer["player"]
+        next unless player && player["id"]
+
+        # Only update if a record already exists (created by lineup enrichment)
+        stat = SevillaPlayerStat.find_by(
+          player_id:      player["id"],
+          season:         season,
+          competition_id: competition_id.to_s
+        )
+        next unless stat
+
+        stat.update!(
+          goals:        scorer["goals"].to_i,
+          assists:      scorer["assists"].to_i,
+          last_updated: Time.now
+        )
+        updated += 1
+      end
+
+      Rails.logger.info("[SevillaStats] Overlaid goals/assists for #{updated} players in comp #{competition_id}")
+    rescue => e
+      Rails.logger.error("[SevillaStats] Error overlaying goals for comp #{competition_id}: #{e.message}")
+    end
+
+    # All finished Sevilla matches for a given competition this season
+    def finished_matches_for_competition(competition_id)
       matches = client.sevilla_finished_matches(season)
       return [] unless matches
 
-      matches.select do |m|
-        m.dig("competition", "id").to_s == competition_id.to_s &&
-          !SevillaStatsJobLog.already_processed?(m["id"])
-      end
+      matches.select { |m| m.dig("competition", "id").to_s == competition_id.to_s }
     end
 
     # Estimate minutes played for a player in a match
     def calculate_minutes(player:, lineup:, substitutions:, match_duration:)
-      in_lineup = lineup.any? { |l| l["id"] == player["id"] }
-
-      # Find if this player was subbed off
+      in_lineup  = lineup.any? { |l| l["id"] == player["id"] }
       subbed_off = substitutions.find { |s| s.dig("playerOut", "id") == player["id"] }
-      # Find if this player was subbed on
       subbed_on  = substitutions.find { |s| s.dig("playerIn", "id") == player["id"] }
 
       if in_lineup
-        subbed_off ? (subbed_off["minute"].to_i) : match_duration
+        subbed_off ? subbed_off["minute"].to_i : match_duration
       elsif subbed_on
         match_duration - subbed_on["minute"].to_i
       else
