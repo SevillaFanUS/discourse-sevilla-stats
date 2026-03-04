@@ -12,6 +12,7 @@ module SevillaStats
       "2154" => "UEFA Conference League"
     }.freeze
 
+
     POSITION_ORDER = %w[Goalkeeper Defender Midfielder Forward Attacker].freeze
 
     # -------------------------------------------------------------------------
@@ -25,7 +26,7 @@ module SevillaStats
 
       comp_rows = emblems.map do |comp_id, emblem_url|
         label       = COMPETITION_LABELS[comp_id.to_s] || "Competition #{comp_id}"
-        # Only render image if URL verified; shrink to max 60px height
+        # Only render image if URL was verified by api_client; show dash otherwise
         emblem_cell = emblem_url ? "<img src=\"#{emblem_url}\" height=\"60\" alt=\"#{label}\">" : "—"
         "| #{label} | #{emblem_cell} |"
       end.join("\n")
