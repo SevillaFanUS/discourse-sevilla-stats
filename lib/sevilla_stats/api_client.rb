@@ -8,10 +8,10 @@ module SevillaStats
     # Competition name map
     COMPETITION_NAMES = {
       "2014" => "La Liga",
-      "2015" => "Copa del Rey",
-      "2018" => "UEFA Europa League",
+      "2079" => "Copa del Rey",
+      "2146" => "UEFA Europa League",
       "2001" => "UEFA Champions League",
-      "2016" => "Championship"
+      "2154" => "UEFA Conference League"
     }.freeze
 
     def initialize(api_key)
@@ -91,6 +91,34 @@ module SevillaStats
       COMPETITION_NAMES[competition_id.to_s] || "Unknown Competition"
     end
 
+    # -------------------------------------------------------------------------
+    # Fetch the emblem URL for a competition, returns nil if unavailable/404
+    # Results are cached in-memory for the lifetime of the client instance
+    # -------------------------------------------------------------------------
+    def competition_emblem(competition_id)
+      @emblem_cache ||= {}
+      return @emblem_cache[competition_id.to_s] if @emblem_cache.key?(competition_id.to_s)
+
+      response = get("/competitions/#{competition_id}")
+      emblem_url = response&.dig("emblem")
+
+      # Verify the emblem URL actually resolves (guard against 404s)
+      verified_url = emblem_url && emblem_reachable?(emblem_url) ? emblem_url : nil
+
+      @emblem_cache[competition_id.to_s] = verified_url
+      verified_url
+    end
+
+    # -------------------------------------------------------------------------
+    # Fetch emblem URLs for all configured competitions
+    # Returns a hash of { competition_id => url_or_nil }
+    # -------------------------------------------------------------------------
+    def competition_emblems
+      competition_ids.each_with_object({}) do |comp_id, hash|
+        hash[comp_id] = competition_emblem(comp_id)
+      end
+    end
+
     private
 
     def get(path, params = {})
@@ -127,6 +155,22 @@ module SevillaStats
     rescue JSON::ParserError => e
       Rails.logger.error("[SevillaStats] JSON parse error: #{e.message}")
       nil
+    end
+
+    # HEAD request to verify an emblem image URL exists (not a 404)
+    def emblem_reachable?(url)
+      uri  = URI(url)
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl     = (uri.scheme == "https")
+      http.read_timeout = 5
+      http.open_timeout = 5
+
+      request  = Net::HTTP::Head.new(uri)
+      response = http.request(request)
+      response.code.to_i == 200
+    rescue StandardError => e
+      Rails.logger.warn("[SevillaStats] Could not verify emblem URL #{url}: #{e.message}")
+      false
     end
   end
 end
