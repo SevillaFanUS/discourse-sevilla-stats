@@ -23,11 +23,16 @@ module SevillaStats
     # Returns array of match hashes
     # -------------------------------------------------------------------------
     def sevilla_finished_matches(season)
-      team_id = SiteSetting.sevilla_stats_team_id
-      response = get("/teams/#{team_id}/matches", { season: season, status: "FINISHED" })
-      return [] unless response && response["matches"]
+      # Cache within this client instance — called once per competition in aggregator
+      # so memoize to avoid burning rate limit budget on repeated identical calls
+      @finished_matches_cache ||= {}
+      return @finished_matches_cache[season.to_s] if @finished_matches_cache.key?(season.to_s)
 
-      response["matches"].select do |m|
+      team_id  = SiteSetting.sevilla_stats_team_id
+      response = get("/teams/#{team_id}/matches", { season: season, status: "FINISHED" })
+      matches  = response&.dig("matches") || []
+
+      @finished_matches_cache[season.to_s] = matches.select do |m|
         competition_ids.include?(m.dig("competition", "id").to_s)
       end
     end
@@ -106,20 +111,17 @@ module SevillaStats
       comp_id_s = competition_id.to_s
       return @emblem_cache[comp_id_s] if @emblem_cache.key?(comp_id_s)
 
-      # Use override URL directly — skip API and HEAD check entirely
+      # Use override URL directly — skip API call entirely
       if OVERRIDDEN_EMBLEMS.key?(comp_id_s)
         @emblem_cache[comp_id_s] = OVERRIDDEN_EMBLEMS[comp_id_s]
         return @emblem_cache[comp_id_s]
       end
 
-      response = get("/competitions/#{competition_id}")
-      emblem_url = response&.dig("emblem")
-
-      # Verify the emblem URL actually resolves (guard against 404s)
-      verified_url = emblem_url && emblem_reachable?(emblem_url) ? emblem_url : nil
-
-      @emblem_cache[comp_id_s] = verified_url
-      verified_url
+      # Pull emblem URL from the competition API response.
+      # No HEAD verification — avoids burning rate limit budget on image checks.
+      # Nil is returned if the API call fails; post_formatter handles nil gracefully.
+      response  = get("/competitions/#{competition_id}")
+      @emblem_cache[comp_id_s] = response&.dig("emblem")
     end
 
     # -------------------------------------------------------------------------
@@ -170,20 +172,5 @@ module SevillaStats
       nil
     end
 
-    # HEAD request to verify an emblem image URL exists (not a 404)
-    def emblem_reachable?(url)
-      uri  = URI(url)
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl     = (uri.scheme == "https")
-      http.read_timeout = 5
-      http.open_timeout = 5
-
-      request  = Net::HTTP::Head.new(uri)
-      response = http.request(request)
-      response.code.to_i == 200
-    rescue StandardError => e
-      Rails.logger.warn("[SevillaStats] Could not verify emblem URL #{url}: #{e.message}")
-      false
-    end
   end
 end
