@@ -29,18 +29,15 @@ module SevillaStats
         # Step 1: Find all finished Sevilla matches for this competition
         all_finished = finished_matches_for_competition(comp_id)
 
-        # Step 2: Enrich ALL finished matches from lineups (idempotent via job log check)
-        all_finished.each do |match|
-          enrich_from_match!(match["id"], comp_id) unless SevillaStatsJobLog.already_processed?(match["id"])
-        end
-
-        # Step 3: Overlay goals/assists from scorers endpoint onto existing records
-        overlay_goals_and_assists!(comp_id)
-
-        # Step 4: Collect unprocessed matches to trigger post creation
+        # Step 2: Collect unprocessed matches — enrichment happens inside process_match!
+        # so we never double-increment appearances/minutes/cards
         unprocessed = all_finished.reject { |m| SevillaStatsJobLog.already_processed?(m["id"]) }
         new_matches.concat(unprocessed)
       end
+
+      # Step 3: Overlay goals/assists from scorers endpoint onto any already-enriched records.
+      # Safe to run every cycle — it only updates existing records, never creates new ones.
+      client.competition_ids.each { |comp_id| overlay_goals_and_assists!(comp_id) }
 
       new_matches
     end
