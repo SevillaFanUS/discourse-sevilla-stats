@@ -50,22 +50,24 @@ after_initialize do
   # Admin route to trigger a manual stats refresh
   # (accessible via /admin/plugins — useful for testing)
   # -------------------------------------------------------------------------
+  module ::SevillaStatsAdmin
+    class Engine < ::Rails::Engine
+      engine_name "sevilla_stats_admin"
+      isolate_namespace SevillaStatsAdmin
+    end
+  end
+
+  SevillaStatsAdmin::Engine.routes.draw do
+    post "/refresh" => "refresh#create"
+  end
+
   Discourse::Application.routes.append do
-    namespace :admin, constraints: StaffConstraint.new do
-      post "plugins/sevilla-stats/refresh" => "plugins/sevilla_stats/refresh#create"
-    end
+    mount ::SevillaStatsAdmin::Engine, at: "/sevilla-stats-admin"
   end
 
-  # Admin controller for manual refresh
-  module ::Admin
-    module Plugins
-      module SevnillaStats
-      end
-    end
-  end
-
-  class Admin::Plugins::SevillaStats::RefreshController < Admin::AdminController
+  class SevillaStatsAdmin::RefreshController < ::ApplicationController
     requires_plugin "discourse-sevilla-stats"
+    before_action :ensure_staff
 
     def create
       Jobs.enqueue(:update_sevilla_stats)
