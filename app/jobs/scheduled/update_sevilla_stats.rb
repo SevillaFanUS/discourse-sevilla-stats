@@ -10,32 +10,37 @@ module Jobs
       return if SiteSetting.sevilla_stats_api_key.blank?
 
       Rails.logger.info("[SevillaStats] Starting stats update job")
+      Rails.logger.info("[SevillaStats] Season: #{SiteSetting.sevilla_stats_season}, Competition IDs: #{SiteSetting.sevilla_stats_competition_ids}, Team ID: #{SiteSetting.sevilla_stats_team_id}")
 
       season     = SiteSetting.sevilla_stats_season
       api_client = SevillaStats::ApiClient.new(SiteSetting.sevilla_stats_api_key)
       aggregator = SevillaStats::StatsAggregator.new(api_client, season)
 
-      # Fetch and verify emblem URLs once per job run (results are cached on api_client)
+      # Fetch emblem URLs once per job run (cached on api_client instance)
       emblems = api_client.competition_emblems
       Rails.logger.info("[SevillaStats] Resolved emblems: #{emblems.map { |k, v| "#{k}=#{v || 'nil'}" }.join(", ")}")
 
       # Step 1: Ensure the season stats topic exists
       topic = ensure_season_stats_topic!(season, emblems)
       return unless topic
+      Rails.logger.info("[SevillaStats] Using topic ##{topic.id}")
 
       # Step 2: Refresh all stats and find new unprocessed matches
+      Rails.logger.info("[SevillaStats] Fetching finished matches...")
       new_matches = aggregator.refresh_all_stats!
+      Rails.logger.info("[SevillaStats] refresh_all_stats! returned #{new_matches.size} unprocessed match(es)")
 
       if new_matches.empty?
         Rails.logger.info("[SevillaStats] No new matches found — nothing to post")
         return
       end
 
-      Rails.logger.info("[SevillaStats] Found #{new_matches.size} new match(es) to process")
-
       # Step 3: For each new match, enrich stats from lineup data, then post update
-      new_matches.each do |match|
+      new_matches.each_with_index do |match, idx|
+        Rails.logger.info("[SevillaStats] Processing match #{idx + 1}/#{new_matches.size}: ID=#{match["id"]}")
         process_match!(match, aggregator, topic, season, api_client, emblems)
+        # Brief pause between matches to respect API rate limits (10 req/min on free tier)
+        sleep(6) if idx < new_matches.size - 1
       end
     rescue => e
       Rails.logger.error("[SevillaStats] Job failed: #{e.message}\n#{e.backtrace.first(5).join("\n")}")
