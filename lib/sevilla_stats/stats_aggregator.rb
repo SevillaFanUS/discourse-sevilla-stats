@@ -24,19 +24,21 @@ module SevillaStats
       new_matches = []
 
       client.competition_ids.each do |comp_id|
-        Rails.logger.info("[SevillaStats] Processing competition #{comp_id}")
+        Rails.logger.info("[SevillaStats] Fetching finished matches for competition #{comp_id}")
 
-        # Step 1: Find all finished Sevilla matches for this competition
         all_finished = finished_matches_for_competition(comp_id)
+        Rails.logger.info("[SevillaStats] Competition #{comp_id}: #{all_finished.size} total finished match(es)")
 
-        # Step 2: Collect unprocessed matches — enrichment happens inside process_match!
-        # so we never double-increment appearances/minutes/cards
         unprocessed = all_finished.reject { |m| SevillaStatsJobLog.already_processed?(m["id"]) }
+        Rails.logger.info("[SevillaStats] Competition #{comp_id}: #{unprocessed.size} unprocessed match(es)")
+        unprocessed.each do |m|
+          Rails.logger.info("[SevillaStats]   -> Match #{m["id"]}: #{m.dig("homeTeam","name")} vs #{m.dig("awayTeam","name")} (#{m["utcDate"]})")
+        end
+
         new_matches.concat(unprocessed)
       end
 
-      # Step 3: Overlay goals/assists from scorers endpoint onto any already-enriched records.
-      # Safe to run every cycle — it only updates existing records, never creates new ones.
+      # Overlay goals/assists onto already-enriched records. Safe every cycle.
       client.competition_ids.each { |comp_id| overlay_goals_and_assists!(comp_id) }
 
       new_matches
